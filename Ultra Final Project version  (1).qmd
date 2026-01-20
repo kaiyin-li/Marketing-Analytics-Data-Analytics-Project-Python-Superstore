@@ -1,0 +1,626 @@
+---
+title: "Marketing Analytics / Data Analytics Project (Python) – Superstore"
+execute: 
+  echo: true
+  eval: true
+format:
+  html:
+    code-fold: false
+    self-contained: true
+jupyter: python3
+---
+
+### Executive Summary
+This project analyzes transactional retail data from Superstore to understand category-level profitability, customer value distribution, and the impact of discounting on margins. The analysis shows that Technology products, particularly Copiers, consistently generate high profit margins, while Office Supplies rely on high sales volume with thinner margins. In contrast, Furniture categories exhibit persistent margin erosion driven by aggressive discounting. Customer segmentation reveals that a small group of high-value customers contributes disproportionately to overall profitability, while mid- and low-value segments are more price-sensitive. These findings suggest opportunities to improve performance by prioritizing high-margin categories, refining discount strategies, and focusing retention efforts on the most valuable customer segments.
+### Problem
+How can Superstore use transaction-level data to identify profitable product categories and high-value customer segments?
+What role do discounts play in driving sales volume versus eroding profit margins?
+How can customer segmentation inform more targeted pricing, promotion, and retention strategies?
+
+### Data Preprocessing：
+The analysis uses a Superstore transactional dataset sourced from Kaggle, containing approximately 9,994 order-level records with customer, product, sales, profit, quantity, and discount information. Data cleaning involved removing incomplete records, standardizing date fields, and validating key identifiers. The dataset was then aggregated to customer- and product-level views to support segmentation and profitability analysis. Both categorical and numerical features were retained to enable downstream clustering and descriptive analytics.
+
+### Data Analytics Performed:
+
+## load required packages
+```{python}
+# Import necessary libraries
+import polars as pl
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+from sklearn.cluster import KMeans
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, accuracy_score,classification_report
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.svm import SVR
+from sklearn.metrics import mean_squared_error
+
+# Set random seed for reproducibility
+np.random.seed(10)
+
+# Load data
+superstore = pl.read_csv("Superstore.csv", ignore_errors=True)
+
+superstore = superstore.drop_nulls()
+superstore.head()
+```
+
+
+# Part 1 : Segmentations
+```{python}
+# Use base variables for clustering and scale the data
+superstore_bases = superstore.select([
+    'Sales',
+    'Quantity',
+    'Profit'])
+```
+
+### Create K-Means Clustering Pipeline
+```{python}
+# Use a sklearn pipeline to streamline the process of processing the data and conducting a k-means analysis
+def create_pipeline(num_clusters, random_seed = 42):
+    """
+    Creates a machine learning pipeline with a scaler and KMeans.
+    """
+    pipeline = Pipeline([
+        # create pipeline(object) calling Pipeline(class)
+        ('scaler', StandardScaler()),
+        # 'scaler' is tuple (more restrict list) it's just the name
+        ('kmeans', KMeans(n_clusters=num_clusters, random_state=random_seed))
+    ])
+    return pipeline
+```
+
+### Determining Optimal Clusters with the Elbow Method
+```{python}
+# Define a function to calculate the total within-cluster sum of squares and plot the elbow graph.
+# Run K-means with the selected number of clusters and assign cluster labels.
+def calculate_totwithinss(data, k):
+    # calculate the difference (totwithinss = difference)
+    kmeans_pipeline = create_pipeline(k, random_seed=10)
+    # declare that you are going to do data analysis
+    kmeans_pipeline.fit(data)
+    # fit = actuall apply into your dataset
+    return kmeans_pipeline['kmeans'].inertia_
+    # inertia = difference
+
+# Calculate tot.withinss for different values of k
+k_values = range(1, 10)
+# k-value give x asix
+totwithinss_values = [calculate_totwithinss(superstore_bases, k) for k in k_values]
+
+# Create a DataFrame for results
+kmeans_results = pl.DataFrame(
+    
+    {'num_clusters': k_values,
+     'tot_withinss': totwithinss_values})
+
+# Plot the elbow method using Plotly Express
+elbow_plot = px.line(
+    data_frame = kmeans_results,
+    x = 'num_clusters',
+    y = 'tot_withinss', 
+    markers = True,
+    labels = {
+        'num_clusters': 'Number of Clusters', 'tot_withinss': 'Total Within SS'
+        },
+    title = 'Elbow Method for Optimal k')
+
+elbow_plot.show()
+```
+
+The elbow plot indicates that k=5 is the optimal number of clusters, as it represents the point where the Total Within-Cluster Sum of Squares (WSS) significantly decreases before leveling off. 
+
+### Use optimal K to do clustering
+```{python}
+# Choose the number of clusters based on the elbow method
+optimal_k = 5
+
+# Run K-means clustering
+superstore_kmeans_pipeline = create_pipeline(optimal_k)
+superstore_kmeans_pipeline.fit(superstore_bases)
+
+# Add cluster assignments to the original data
+superstore_with_clusters = superstore.with_columns(
+    pl.Series(
+        "segment_number",
+        superstore_kmeans_pipeline['kmeans'].labels_ + 1
+        ).cast(pl.Utf8).cast(pl.Categorical) 
+)
+
+superstore_with_clusters.head()
+```
+
+### Segment Description
+```{python}
+# Calculate summary statistics for each segment
+segment_summary = superstore_with_clusters.group_by('segment_number').agg(
+    [
+        pl.mean('Sales').alias('mean_sales'),
+        pl.mean('Quantity').alias('mean_quantity'),
+        pl.mean('Discount').alias('mean_discount'),
+        pl.mean('Profit').alias('mean_profit'),
+        pl.len().alias('n')
+    ]
+)
+
+# convert into correct order
+segment_summary = segment_summary.with_columns(
+    pl.col("segment_number").cast(pl.Int64)
+).sort("segment_number", descending=False) 
+
+segment_summary
+```
+Customer segmentation reveals that a small number of high-value segments generate a disproportionate share of profit while remaining relatively insensitive to discounts. Mid-value segments show growth potential but require targeted engagement to improve profitability, whereas the largest low-value segments are highly price-sensitive and contribute limited margin despite their size. These results suggest that discount-heavy strategies should be selectively applied, with greater emphasis placed on retaining and expanding high-value customers. Prioritizing high-margin segments and refining promotional intensity can improve overall profitability without relying on volume-driven growth alone.
+
+# Part 2: Sales Trend
+This section examines sales and profitability patterns across products, categories, and customer segments. The analysis focuses on distinguishing volume-driven growth from margin-driven performance to identify where sales scale contributes to sustainable profitability and where it erodes margins. These insights support more targeted pricing, promotion, and category-level strategies.
+
+### Overall Best product and Best category overtime
+```{python}
+# Analyze best-selling products
+best_selling_products_by_sales = (
+    superstore
+    .group_by('Product Name') 
+    .agg([
+        pl.sum("Sales").alias("sum_sales"), 
+        pl.sum("Profit").alias("sum_profit"),
+        pl.sum("Quantity").alias("sum_quantity"),
+        pl.col("Category").first()
+    ])
+    .sort("sum_sales", descending=True) 
+    .head(10) 
+)
+
+print("\nBest-Selling Products base on sales:")
+print(best_selling_products_by_sales)
+
+best_selling_products_by_profit = (
+    superstore
+    .group_by('Product Name') 
+    .agg([
+        pl.sum("Sales").alias("sum_sales"), 
+        pl.sum("Profit").alias("sum_profit"),
+        pl.sum("Quantity").alias("sum_quantity"),
+        pl.col("Category").first()
+    ])
+    .sort("sum_profit", descending=True) 
+    .head(10) 
+)
+
+print("\nBest-Selling Products base on profit:")
+print(best_selling_products_by_profit)
+
+# Analyze high-performing categories
+best_performing_categories = (
+    superstore
+    .group_by('Category')
+    .agg([
+        pl.sum("Sales").alias("sum_sales"),
+        pl.sum("Profit").alias("sum_profit"),
+        pl.sum("Quantity").alias("sum_quantity")
+        ])
+    .sort("sum_sales", descending=True) 
+    .head()
+)
+
+print("\nBest-Performing Categories:")
+print(best_performing_categories)
+
+```
+**Product-level insights:**
+Category and Product Performance
+Key Observations
+
+Sales volume and profitability diverge significantly across categories.
+High total sales do not necessarily translate into high profit, particularly in categories with aggressive discounting.
+
+Technology is the primary profit driver.
+Technology generates the highest total profit despite lower transaction volume than Office Supplies, indicating higher price points and stronger margins.
+
+Office Supplies follows a high-volume, moderate-margin model.
+Office Supplies contributes substantial revenue through large transaction volumes, but thinner margins limit per-unit profitability.
+
+Furniture underperforms on profitability.
+Although Furniture achieves comparable sales levels, profits remain low, suggesting margin erosion driven by discount intensity rather than demand strength.
+
+Takeaway: Category performance reflects a clear trade-off between volume and margin, with Technology driving profitability and Furniture requiring pricing and promotion reassessment.
+
+### Segment and best product in segment
+```{python}
+# Best-Selling Products
+# Aggregating data
+top_profit_products_by_segment = (
+    superstore_with_clusters
+    .group_by(["segment_number", "Product Name"])
+    .agg([
+        pl.sum("Profit").alias("sum_profit"),  # Summing up Profit
+        pl.sum("Sales").alias("sum_sales"),   # Summing up Sales (optional, for reference)
+        pl.sum("Quantity").alias("sum_quantity"),
+        pl.col("Category").first()
+    ])
+    .sort(["segment_number", "sum_profit"], descending=[False, True])  # Sort by segment and profit descending
+)
+
+# Taking the top 5 profit products for each segment
+top_5_profit_products = (
+    top_profit_products_by_segment
+    .group_by("segment_number")
+    .head(5)  # Top 5 rows for each segment
+)
+
+# Displaying the results
+print("Top 5 Profit Products by Segment:")
+print(top_5_profit_products)
+```
+
+### Best performing Categories by segment
+```{python}
+# High-Performing Categories with Ranking by Profit
+best_performing_categories_by_segment = (
+    superstore_with_clusters
+    .group_by(["segment_number", "Category"])
+    .agg([
+        pl.sum("Sales").alias("sum_sales"),
+        pl.sum("Profit").alias("sum_profit"),
+        pl.sum("Quantity").alias("sum_quantity"),
+    ])
+    .sort(["segment_number", "sum_profit"], descending=[False, True]) )
+
+categor1 = print(best_performing_categories_by_segment.filter(pl.col("segment_number") == "1").head())
+categor2 = print(best_performing_categories_by_segment.filter(pl.col("segment_number") == "2").head())
+categor3 = print(best_performing_categories_by_segment.filter(pl.col("segment_number") == "3").head())
+categor4 = print(best_performing_categories_by_segment.filter(pl.col("segment_number") == "4").head())
+categor5 = print(best_performing_categories_by_segment.filter(pl.col("segment_number") == "5").head())
+```
+**Sales Performance by Customer Segment**
+
+To ensure segment-level insights were not driven by extreme outliers, the top profit-contributing products within each segment were reviewed. This validation step confirms that observed segment patterns reflect consistent purchasing behavior rather than isolated high-impact items.
+
+*Segment-Level Insights*
+
+High-value segments (Segments 2 and 5) generate disproportionate profit and show low sensitivity to discounts, driven primarily by Technology products.
+
+Mid-value segments (Segment 4) demonstrate strong profitability potential with balanced volume and margin characteristics.
+
+Large, price-sensitive segments (Segments 1 and 3) contribute revenue through volume but deliver limited profit, particularly when purchasing Furniture and heavily discounted items.
+
+Takeaway: Segment profitability varies more by margin sensitivity than by sales volume, reinforcing the need for differentiated promotional strategies.
+
+*Category Performance Within Segments*
+
+Technology performs consistently well across high-value and growth-oriented segments, reinforcing its role as the core profit category.
+
+Office Supplies remains profitable in volume-driven segments, particularly where repeat purchasing behavior is present.
+
+Furniture contributes limited profit in most segments, with exceptions in higher-value segments where discount reliance is lower.
+
+Strategic implication: Category strategies should be segment-specific rather than uniform across the customer base.
+
+## FRM Analysis
+### Prepare for the analysis
+```{python}
+# Convert 'Order Date' to datetime format using Polars
+superstore = superstore.with_columns(
+    pl.col("Order Date").str.strptime(pl.Date, "%m/%d/%Y").alias("Order Date"),
+    pl.col("Customer ID").str.replace_all("-", "").alias("Customer ID"),
+    pl.col("Order ID").str.replace_all("-", "").alias("Order ID")
+)
+
+# Verify the conversion
+print(superstore.head())
+```
+
+### Get RFM data
+```{python}
+
+# Calculate the most recent transaction date
+latest_date = superstore.select(pl.col("Order Date").max())[0, 0]
+
+# Calculate Recency, Frequency, and Monetary
+rfm_data = (
+    superstore.group_by("Customer ID").agg([
+        (pl.lit(latest_date) - pl.col("Order Date").max()).alias("most_recent_transaction"),
+        pl.col("Order ID").n_unique().alias("number_of_transactions"),
+        pl.col("Profit").sum().alias("total_profit"),
+        (pl.col("Profit").sum() / pl.col("Sales").sum()).alias("average_profit_margin"),
+    ])
+)
+
+# Display RFM data
+print(rfm_data)
+```
+
+### Draw Histograms based on rfm data
+```{python}
+# Convert Polars DataFrame to Pandas DataFrame
+rfm_df = rfm_data.to_pandas()
+rfm_df['most_recent_transaction'] = rfm_df['most_recent_transaction'].dt.days
+
+# Visualizing Recency, Frequency, and Monetary metrics
+R_hist = px.histogram(rfm_df, x='most_recent_transaction', title='Recency Distribution', labels={'x': 'Days Since Last Transaction'})
+R_hist.show()
+
+F_hist = px.histogram(rfm_df, x='number_of_transactions', title='Frequency Distribution', labels={'x': 'Number of Transactions'})
+F_hist.show()
+
+M_hist_profit = px.histogram(rfm_df, x='total_profit', title='Monetary Distribution (Profit)', labels={'x': 'Total Profit'})
+M_hist_profit.show()
+
+# Visualizing Average Profit Margin
+Margin_hist = px.histogram(rfm_df, x='average_profit_margin', title='Average Profit Margin Distribution', labels={'x': 'Profit Margin'})
+Margin_hist.show()
+
+```
+
+### log the skewed data
+```{python}
+# Log-transform the relevant columns 
+rfm_df['log_most_recent_transaction'] = np.log1p(rfm_df['most_recent_transaction'])  # Recency
+rfm_df['log_total_profit'] = np.log1p(rfm_df['total_profit']) 
+
+# Visualize the log-transformed columns
+R_trans_hist = px.histogram(rfm_df, x='log_most_recent_transaction', title='Log-Transformed Recency Distribution', labels={'x': 'Log(1 + Days Since Last Transaction)'})
+R_trans_hist.show()
+
+M_trans_hist_profit = px.histogram(rfm_df, x='log_total_profit', title='Log-Transformed Monetary Distribution (Profit)', labels={'x': 'Log(1 + Total Profit)'})
+M_trans_hist_profit.show()
+
+```
+**Recency**
+Original Recency Distribution:
+The original histogram for recency reveals a highly right-skewed distribution, with most customers concentrated at the lower end of the scale. This indicates that a significant portion of customers made their last purchase within a relatively short timeframe, while a large group has not purchased for an extended period. The long tail of the distribution, representing customers with very high recency values (e.g., over 300 days), signifies dormant or inactive customers who have disengaged from the store's offerings.
+
+This skewed distribution presents challenges for understanding the full spectrum of customer engagement. While the spike in lower recency values highlights active customers, the dominance of dormant ones creates difficulties in identifying meaningful clusters of customer behavior. Without further transformation, it becomes hard to discern mid-range customer groups who are neither highly engaged nor completely inactive but could represent an important segment for targeted marketing.
+
+Log-Transformed Recency Distribution:
+The transformation reduces the visual dominance of dormant customers in the original histogram and allows mid-range recency values to emerge more clearly. Customers who fall in the middle of the log-transformed scale might represent those who purchased recently but not frequently enough to qualify as loyal buyers. These mid-range customers may respond well to timely reminders or smaller incentives to re-engage them before they lapse entirely.
+
+**Frequency**
+The frequency distribution shows that most customers make 4 to 8 purchases, forming the core of the store’s customer base. These semi-regular buyers are key to consistent revenue and should be kept engaged with personalized offers and seasonal promotions.
+
+A smaller group, with 10 or more purchases, represents the store’s most loyal customers. These buyers should be rewarded with exclusive perks, loyalty programs, or tailored experiences to keep them coming back and maximize their lifetime value.
+
+On the flip side, customers with fewer than 4 purchases are less engaged, likely one-time or new buyers. Targeting them with welcome discounts or personalized product recommendations can encourage repeat purchases and help grow this segment into more regular buyers. By focusing on both loyal and low-frequency customers, the store can strengthen its overall customer base.
+
+**Monetary (Total Profit & profit_margin)**
+
+Profit Distribution (Before and After Log Transformation):
+The original profit distribution is sharply centered around zero, with many transactions showing either negligible or negative profit. This highlights inefficiencies, possibly caused by discounts, high costs, or low-margin products. A small number of high-profit transactions stand out, contributing disproportionately to the overall profit. However, this skewness makes it challenging to analyze patterns across all customers.
+
+After log transformation, the profit distribution becomes more normalized. The transformation compresses the scale of high-profit transactions and spreads out the lower and negative values. This enables a clearer understanding of customer profit contributions and highlights more meaningful clusters of low, moderate, and high-profit customers.
+
+Key Takeaways:
+1. Many transactions hover near zero profit, indicating potential areas for improvement, such as adjusting pricing or discount strategies.
+2. High-profit customers, though fewer in number, play a crucial role in overall profitability and should be prioritized for retention efforts.
+3. Low or negative profit transactions should be analyzed to identify and resolve underlying causes.
+
+Profit Margin Distribution:
+The profit margin distribution is bell-shaped, with most transactions achieving positive margins. However, a noticeable portion falls into the negative range, pointing to inefficiencies in pricing or high discount usage.
+
+Key Takeaways:
+1. Positive profit margins from most transactions indicate healthy product lines, which should be prioritized in future strategies.
+2. Negative margins highlight inefficiencies that need immediate attention, such as adjusting discount policies or addressing high-cost product categories.
+
+
+## Overall Sales Trend Recommandations
+**Prioritize Technology Products:** Technology is a high-margin category and a consistent leader across segments. Invest in marketing and loyalty programs to retain high-value customers. Bundling Technology products with complementary items could further increase average transaction values.
+
+**Optimize Office Supplies:** Office Supplies, being a high-volume driver, should focus on top-performing subcategories. Streamlining inventory and phasing out underperforming items can ensure continued profitability while leveraging its wide customer base.
+
+**Revamp Furniture Strategy:** Address inefficiencies in the Furniture category by reassessing pricing strategies, reducing discounts, and improving inventory forecasting. Consider introducing premium Furniture lines to cater to higher-value segments, such as Segment 5.
+
+**Reduce Dependence on High-Sales Customers:** Diversify the revenue base by nurturing mid-range customers into high-sales contributors through targeted promotions, upselling, and cross-selling strategies.
+
+**Enhance Inventory Management:** Implement robust demand forecasting to reduce overstocking and limit heavy discounting, which impacts overall profitability. This is particularly critical for Furniture and Office Supplies categories.
+
+**Leverage FRM Insights:** Use Recency, Frequency, and Monetary analysis to focus on retaining high-value customers, re-engaging dormant ones, and improving the profitability of mid-range segments.
+
+
+# Part 3 : Profitability
+This section analyzes profitability across customer segments and product categories using profit margin as a summary metric for pricing and discount effectiveness. Rather than focusing on revenue alone, the goal is to identify where sales translate into sustainable profit and where discount intensity or product mix drives margin erosion. The outputs of this section support category prioritization and pricing/promotion adjustments at the sub-category level.
+
+### Profitability by Segment
+```{python}
+# Analyze which segment is most profitable
+profitability = (
+   superstore_with_clusters
+    .group_by('segment_number')
+    .agg([
+        pl.col('Profit').mean().alias('avg_profit'),
+        pl.len().alias('num_customers')
+        ])
+    .with_columns(pl.col('segment_number').cast(pl.Int64))
+    .sort('segment_number')
+)
+
+profitability
+```
+
+```{python}
+superstore_with_margin = superstore.with_columns([
+  (pl.col("Profit")/ pl.col("Sales")).alias("Profit Margin"),
+  (pl.col("Sales")-pl.col("Profit")).alias("Cost")
+])
+
+superstore_with_margin.head()
+```
+
+### Here calculated and added a column for the Profit Margin
+```{python}
+# grouping profit margin by categories
+margin = superstore_with_margin.group_by(['Category', 'Sub-Category']).agg([
+    pl.sum("Sales").alias("Total Sales"),
+    pl.sum("Profit").alias("Total Profit"),
+    pl.mean('Profit Margin').alias("Avg Profit Margin")])
+
+high_margin = margin.sort('Avg Profit Margin', descending=True)
+low_margin = margin.sort('Avg Profit Margin', descending=False)
+
+print("High Margin Products:")
+print(high_margin)
+
+print("Low Margin Products:")
+print(low_margin)
+```
+
+### Join dataset
+```{python}
+merged_df = superstore.join(
+    margin, 
+    on=["Category", "Sub-Category"],
+    how="left"
+)
+
+print("Merged DataFrame:")
+print(merged_df)
+```
+
+```{python}
+# Define features and target
+numeric_features = ['Profit', 'Sales', 'Discount']
+target = "Avg Profit Margin"
+
+# Define preprocessor
+categorical_features = ["Category"] 
+features = categorical_features + numeric_features
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), numeric_features), 
+        ('cat', OneHotEncoder(), categorical_features) 
+    ]
+)
+
+# Split the data into training and testing sets
+train, test = train_test_split(merged_df, test_size=0.5, random_state=11109)
+
+train_df = train.to_pandas()
+test_df = test.to_pandas()
+```
+
+### ML Pipelines
+```{python}
+# Define models with pipelines
+lr_pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('model', LinearRegression())
+])
+
+rf_pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('model', RandomForestRegressor(n_estimators=50, random_state=11109))
+])
+
+svm_pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('model', SVR())
+])
+
+```
+
+### Train and Predict
+```{python}
+# Train and predict
+lr_pipeline.fit(train_df[features], train_df[target])
+train_df["lr_prediction"] = lr_pipeline.predict(train_df[features])
+test_df["lr_prediction"] = lr_pipeline.predict(test_df[features])
+
+rf_pipeline.fit(train_df[features], train_df[target])
+train_df["rf_prediction"] = rf_pipeline.predict(train_df[features])
+test_df["rf_prediction"] = rf_pipeline.predict(test_df[features])
+
+svm_pipeline.fit(train_df[features], train_df[target])
+train_df["svm_prediction"] = svm_pipeline.predict(train_df[features])
+test_df["svm_prediction"] = svm_pipeline.predict(test_df[features])
+```
+
+### Compute Error and RMSE
+```{python}
+# Add error columns directly to test dataframe
+test_df = pl.DataFrame(test_df).with_columns([
+    (pl.col("lr_prediction") - pl.col(target)).alias("lr_error"),
+    (pl.col("rf_prediction") - pl.col(target)).alias("rf_error"),
+    (pl.col("svm_prediction") - pl.col(target)).alias("svm_error"),
+])
+
+# Test computation
+test_df.select([
+    pl.col("lr_error"),
+    pl.col("lr_error").pow(2).alias("lr_squared"),
+    pl.col("lr_error").pow(2).mean().alias("lr_mean"),
+    pl.col("lr_error").pow(2).mean().sqrt().alias("lr_rmse"),
+    
+])
+
+# Compute RMSE for each method
+rmse = test_df.select([
+    pl.col("lr_error").pow(2).mean().sqrt().alias("lr_rmse"),
+    pl.col("rf_error").pow(2).mean().sqrt().alias("rf_rmse"),
+    pl.col("svm_error").pow(2).mean().sqrt().alias("svm_rmse"),
+])
+print("RMSE for each method:")
+print(rmse)
+```
+The RMSE resulted in 0.19 for the linear regression, 0.19 for the support vector regression and 0.17 for the random forest which is the lowest. Given that it is the RMSE closest to 0, we know that it is the best method to predict the continuous variable of the Avg Profit Margin becuase it will result in the smallest error. 
+
+### Visualize Predictions vs Actual Values
+```{python}
+# Scatter plot for predictions vs actual values
+def predict_vs_actual_plot(df, prediction_col, mytitle):
+    fig = px.scatter(
+        df,
+        x = 'Avg Profit Margin',
+        y = prediction_col,
+        title = mytitle,
+        labels = {"x": "Actual Avg Profit Margin", "y": "Predicted Value"}
+    )
+    fig.show()
+
+predict_vs_actual_plot(test_df, "lr_prediction", "Linear Regression: Predicted vs Actual")
+predict_vs_actual_plot(test_df, "rf_prediction", "Random Forest: Predicted vs Actual")
+predict_vs_actual_plot(test_df, "svm_prediction", "SVM: Predicted vs Actual")
+```
+Based on the Random Forest scatter plot, the predicted vs. actual values are mostly closesly aligned so we have found a reliable prediction on the Average Profit Margin. Given the large dataset, we have a few outliers because some rows deviated from the average, but overall its a strong prediction of the continuous variable. 
+
+**Key Takeaways**
+To achieve our goal of optimizing the superstore's revenue generation, we identified high margin and low margin products to understand which products they should invest more or less in. 
+
+The noticeable high margin products are all within the Office Supplies and Technology categories. While the low margin products are among the Office Supplies, Furniture, and Technology categories, which is plausible given our earlier analysis of the sales trends. 
+
+As we analyze the data more closely, certain sub-categories differentiate the profit margins. Inspecting the high margin products, Office Supply Labels (42.97%), Paper (42.56%) Envelopes (42.31%), and Fasteners (29.92%) are generating significantly higher revenues than the low margin Office Supplies of Binders (-19.96%) and Appliances (-15.69%). Comparing the differences in profit margin, we advise the superstore to continue their rewarding production of Labels, Paper, Envelopes, and Fasteners but remanage their pricing on Binders and Appliances because they are losing money on every sale they make. Pricing is likely the issue because Labels (12,486 sales), Paper (78,479 sales) Envelopes (16,476), and Fasteners (3,024) have less sales, but relative profits ($950-$34,054). While Binders (203,412 sales) and Appliances (107,532 sales) have higher sales, but minimal profits ($30,222-$18,138). These issues can be attributed to insufficient low pricing or over discounting products in relation to production costs and therefore the superstore needs to re-evaluate.
+
+The same logic applies to the Technology sub-categories. Copiers have high sales (149,528) and relative profits (55,618) while Machines have high sales (189,238) and low profits ($3,385). The superstore should enact the same re-evaluation of pricing for Machines because they are a highly sold product, but are over discounted or priced too low for the production costs and are losing the business money (-7.20% profit margin).
+
+Furniture stands out as a loss to the company based on our data. Specifically, the production costs of Tables and Bookcases are exceeding its revenue, resulting in a financial loss (-17,725 to and -3,473 loss in total profit). We advise the Superstore to re-evaluate the costs of production and pricing for the Tables and Bookcases to be proportional and to generate a positive return. This could mean cutting costs of production or raising the prices without offering steep discounts. 
+
+In conclusion, identifying the high and low margin products is helpful to differentiate the products worth maintaining versus re-evaluating. The furniture category needs a deeper examination and all subcategories should be analyzed as profitable or unprofitable. To increase profitability, the superstore should adjust the pricing of extremely low margin products especially the products with negative profit margins. 
+
+
+# Implications
+The segmentation analysis provides clear implications for developing a targeted, customer-centric strategy to maximize profitability and growth. Segments 2 and 5 emerge as the most valuable groups due to their high revenues and insensitivity to discounts, making them the top priorities for retention and expansion through loyalty programs, personalized services, and exclusive benefits. Segment 4, with its moderate discount reliance and strong profitability, presents significant growth potential and should be nurtured with premium product bundles and targeted promotions. In contrast, Segments 1 and 3, though large, offer lower profitability due to high price sensitivity and reliance on discounts. Strategies for these groups should focus on bulk purchase promotions, cross-selling, and encouraging higher-value purchases to enhance their contribution. Overall, prioritizing high-value segments while fostering the development of mid-tier customers ensures optimal resource allocation and supports sustainable revenue growth.
+
+The second analysis implied that Segment 1, the largest by customer count, relies heavily on discounts, with Office Supplies and Technology driving profitability. To enhance profitability, bundling these categories with higher-margin products and reducing Furniture discounts is essential. Segment 2, though small, is exceptionally profitable due to a strong preference for premium Technology and Office Supplies products. Retention strategies like personalized offers and loyalty programs are crucial for maintaining and expanding this high-value segment. Segment 3, while the largest in customer count, struggles with low profitability, especially due to Furniture losses. Shifting these customers toward higher-margin Office Supplies and Technology products and minimizing Furniture inefficiencies are necessary to improve their contribution. Segment 4 shows significant growth potential, with Technology and Office Supplies leading profitability. Targeted promotions and premium product bundles can further enhance this segment's engagement and value. Finally, Segment 5, the smallest yet most profitable, underscores the importance of catering to high-value customers with personalized services and premium offerings for technological products.
+
+The third analysis provides critical implications for optimizing the superstore’s profitability through strategic pricing and product management. High-margin products, such as Office Supplies (Labels, Paper, and Envelopes) and Technology (Copiers), demonstrate strong profitability with relatively lower sales volumes, indicating that their current pricing and cost structures are efficient and should be prioritized for continued investment. Conversely, low-margin and negative-margin products, including Office Supplies (Binders and Appliances), Technology (Machines), and Furniture (Tables and Bookcases), reflect inefficiencies in pricing, discounts, or production costs that require immediate re-evaluation. For the Furniture category, losses are particularly concerning, with high production costs and deep discounts leading to significant negative profits. Adjustments, such as reducing production costs, improving inventory management, or recalibrating prices, are essential to make this category viable. Similarly, for low-margin Technology products like Machines, addressing over-discounting and pricing below cost can help align this sub-category with overall profitability goals.
+
+# Managerial Recommendations and Actionable Plans
+
+Retain and Expand High-Value Customers (Segments 2 and 5):
+Segments 2 and 5 represent the highest-value customers with significant revenue generation and minimal sensitivity to discounts. To retain these customers, implement loyalty programs tailored to their preferences, such as exclusive benefits, premium product access, and personalized recommendations. Segment 2 customers, who prefer premium Technology and Office Supplies, should be engaged through tailored marketing campaigns and VIP perks. For Segment 5, where high-value Technology dominates, provide early access to premium products and bespoke customer service to ensure satisfaction and loyalty. Additionally, focus on acquiring similar high-value customers by leveraging data analytics to identify shared purchasing behaviors and targeting these prospects with personalized promotions and premium product bundles.
+
+Improve Profitability in Price-Sensitive Segments (Segments 1 and 3):
+Segments 1 and 3, though large in customer count, struggle with profitability due to their reliance on discounts and low-margin products. For Segment 1, bundle Office Supplies and Technology with higher-margin products to improve overall profitability. Strategies should also encourage bulk purchases and cross-selling to maximize transaction values. For Segment 3, prioritize shifting customer purchases away from loss-making Furniture products toward more profitable Office Supplies and Technology. Address inefficiencies in the Furniture category by reassessing production costs and pricing strategies. Implement targeted promotions to encourage higher-value purchases and loyalty among these price-sensitive customers.
+
+Optimize Low-Margin and Loss-Making Products:
+Address inefficiencies in low-margin products like Office Supplies (Binders, Appliances), Technology (Machines), and Furniture (Tables, Bookcases). Reevaluate pricing and discounting policies to align costs and revenues. Reduce over-discounting and explore cost-saving measures in production and inventory management. Invest in high-margin products like Office Supplies (Labels, Paper, Envelopes) and Technology (Copiers) to maintain profitability and revenue growth. Shift marketing focus to these high-performing products while phasing out or restructuring loss-making categories like Furniture.
